@@ -21,12 +21,14 @@ const int PORT_SEND_BASE = 32768 + 666;
 const int MTU_MAX_SIZE = 1500;
 const int ICMP_HDR_SZ = 8;
 const int UDP_HDR_SZ = 8;
+const int MAX_TTL = 30;
 
 int sigalrm_triggered;
 
 struct args {
   char *host;
   int nprobes;
+  int max_ttl;
 };
 
 struct traceopts {
@@ -50,7 +52,7 @@ struct traceopts {
 #define ihl_to_bytes(ihl) ((ihl) << 2)
 
 void exit_usage(char *pname) {
-  eprintf("usage: %s -p <probes> <hostname>\n", pname);
+  eprintf("usage: %s -p <probes> -t <max_ttl> <hostname>\n", pname);
   exit(EXIT_FAILURE);
 }
 
@@ -89,13 +91,18 @@ char *sockaddr_ntop_host(const struct sockaddr *addr) {
 
 struct args parse_args(int argc, char **argv) {
   int opt;
-  struct args args = {.nprobes = NUM_PROBES};
+  struct args args = {.nprobes = NUM_PROBES, .max_ttl = MAX_TTL};
 
   opterr = 0;
-  while ((opt = getopt(argc, argv, "p:")) != -1) {
+  while ((opt = getopt(argc, argv, "p:t:")) != -1) {
     switch (opt) {
     case 'p':
       if ((args.nprobes = atoi(optarg)) < 1) {
+        exit_usage(argv[0]);
+      }
+      break;
+    case 't':
+      if ((args.max_ttl = atoi(optarg)) < 1) {
         exit_usage(argv[0]);
       }
       break;
@@ -214,9 +221,10 @@ int get_host(struct sockaddr *sa, socklen_t sa_len, char host[NI_MAXHOST]) {
 int traceloop(struct traceopts *traceopts) {
   int ttl, done = 0;
 
-  for (ttl = 1; ttl < traceopts->max_ttl && !done; ttl++) {
+  for (ttl = 1; ttl <= traceopts->max_ttl && !done; ttl++) {
     int probe, send_probe = 1;
     printf("%2d. ", ttl);
+    fflush(stdout);
 
     for (probe = 0; probe < traceopts->nprobes && send_probe; probe++) {
       int dport = PORT_SEND_BASE + ttl + probe;
@@ -237,8 +245,6 @@ int traceloop(struct traceopts *traceopts) {
         perror("sendto");
         return -1;
       }
-
-      fflush(stdout);
 
       enum recv_probe_ret probe_ret = recv_probe(traceopts, dport);
       switch (probe_ret) {
@@ -315,7 +321,7 @@ int main(int argc, char **argv) {
   }
 
   traceopts.nprobes = args.nprobes;
-  traceopts.max_ttl = 30; /* TODO: set via console argument */
+  traceopts.max_ttl = args.max_ttl;
 
   traceopts.send_addrlen = res->ai_addrlen;
   traceopts.send_addr = res->ai_addr; /* TODO: what about the next matches? */
