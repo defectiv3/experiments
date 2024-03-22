@@ -112,16 +112,14 @@ struct args parse_args(int argc, char **argv) {
   return args;
 }
 
-/*
-	listens for a ICMP packet that matches the probe we sent
+enum recv_probe_ret {
+  RECV_PROBE_SYSTEM_ERR,
+  RECV_PROBE_TIMEOUT,
+  RECV_PROBE_TIMXCEED,
+  RECV_PROBE_UNREACH,
+};
 
-  returns:
-    -1 on unhandled errors
-    -2 on timeout waiting for the probe
-    -3 when packet TTL reached 0
-    -4 when packet reached destination
-*/
-int recv_probe(struct traceopts *traceopts, int dport) {
+enum recv_probe_ret recv_probe(struct traceopts *traceopts, int dport) {
   char recvbuf[MTU_MAX_SIZE];
   int ret;
 
@@ -129,7 +127,7 @@ int recv_probe(struct traceopts *traceopts, int dport) {
   alarm(3);
   for (;;) {
     if (sigalrm_triggered) {
-      ret = -2;
+      ret = RECV_PROBE_TIMEOUT;
       break;
     }
 
@@ -141,7 +139,7 @@ int recv_probe(struct traceopts *traceopts, int dport) {
         continue;
       } else {
         perror("recvfrom");
-        ret = -1;
+        ret = RECV_PROBE_SYSTEM_ERR;
         break;
       }
     }
@@ -186,7 +184,7 @@ int recv_probe(struct traceopts *traceopts, int dport) {
     if (orig_ip->ip_p == IPPROTO_UDP && orig_udp->uh_dport == htons(dport) &&
         orig_udp->uh_sport == htons(traceopts->bind_port)) {
       if (icmp->icmp_type == ICMP_TIMXCEED) {
-        ret = -3;
+        ret = RECV_PROBE_TIMXCEED;
       } else {
         if (icmp->icmp_code == ICMP_UNREACH_PORT) {
           // TODO (phos)
@@ -194,9 +192,12 @@ int recv_probe(struct traceopts *traceopts, int dport) {
           // host but there's a very smol possibility that it isn't right?
           // Should we switch to check that the dst address on the ip packet
           // is the same that we specified originally?
-          ret = -4;
+          ret = RECV_PROBE_UNREACH;
         } else {
-          ret = icmp->icmp_code;
+          eprintf("recv_probe: icmp packet of type ICMP_UNREACH has unhandled "
+                  "icmp code %d\n",
+                  icmp->icmp_code);
+          return RECV_PROBE_SYSTEM_ERR;
         }
       }
       break;
@@ -211,7 +212,7 @@ int get_host(struct sockaddr *sa, socklen_t sa_len, char host[NI_MAXHOST]) {
 }
 
 int traceloop(struct traceopts *traceopts) {
-  int ttl, ret, done = 0;
+  int ttl, done = 0;
 
   for (ttl = 1; ttl < traceopts->max_ttl && !done; ttl++) {
     int probe, send_probe = 1;
@@ -239,32 +240,33 @@ int traceloop(struct traceopts *traceopts) {
 
       fflush(stdout);
 
-      ret = recv_probe(traceopts, dport);
-      switch (ret) {
-      case -1:
+      enum recv_probe_ret probe_ret = recv_probe(traceopts, dport);
+      switch (probe_ret) {
+      case RECV_PROBE_SYSTEM_ERR:
         return -1;
-      case -2:
+      case RECV_PROBE_TIMEOUT:
         printf(" *");
         break;
-      case -3:
-      case -4: {
-				char *host_addr = sockaddr_ntop_host(traceopts->bind_addr);
+      case RECV_PROBE_TIMXCEED:
+      case RECV_PROBE_UNREACH: {
+        char *host_addr = sockaddr_ntop_host(traceopts->bind_addr);
         char host[NI_MAXHOST];
 
-				if (get_host(traceopts->bind_addr, traceopts->bind_addrlen, host) == 0) {
-					printf(" %s (%s)", host, host_addr);
-				} else {
-					printf(" %s", host_addr);
-				}
+        if (get_host(traceopts->bind_addr, traceopts->bind_addrlen, host) ==
+            0) {
+          printf(" %s (%s)", host, host_addr);
+        } else {
+          printf(" %s", host_addr);
+        }
 
-        if (ret == -4) {
+        if (probe_ret == RECV_PROBE_UNREACH) {
           done = 1;
         }
 
         send_probe = 0;
       } break;
       default:
-        eprintf("recv_probe: return code %d not handled\n", ret);
+        eprintf("recv_probe: return code %d not handled\n", probe_ret);
         return -1;
       }
 
