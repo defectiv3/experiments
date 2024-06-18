@@ -1,0 +1,18 @@
+TIMsplit
+
+Given a binary file that has many TIM structures squashed in it, this program
+parses them and writes each one into its own file.
+
+This program was written to parse a file DUMMY.CDA found inside the Guilty Gear
+(1998-JP) psx game. It has only been tested on 4bpp TIM files but it should work
+on the rest too hopefully. ::)
+
+Very much barebone, I'd love to improve it if I find more uses for it while REing
+shit.
+
+some ideas
+- add a parser that works headerless, i.e. assume data[0] contains a TIM structure
+  without a header, and parse from there. To be able to do this, the program needs
+  to assume the bpp, so it should be a parameter passed by the user.
+- add a parameter to dry-run the program without generating any files, only
+  printing the structures.
