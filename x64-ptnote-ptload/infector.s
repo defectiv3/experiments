@@ -14,6 +14,12 @@
 ; compile with> nasm -f elf64 infector.s -o infector.o; ld -o infector infector.s                ;
 ;                                                                                                ;
 ; Same shit as the other ones, use it at your own risk and go break stuff <3                     ;
+;                                                                                                ; 
+; :: references ::                                                                               ; 
+; - https://tmpout.sh/1/2.html                                                                   ; 
+; - https://tmpout.sh/1/Linux.Midrashim.asm                                                      ;
+; - https://tmpout.sh/1/Linux.Kropotkine.asm                                                     ;
+; - elf64 spec; intel manual vol. 2 (for ixs details); nasm docs (for nasm specific stuff)       ;
 ;------------------------------------------------------------------------------------------------;
 
 ;-------------- syscalls ---------------;
